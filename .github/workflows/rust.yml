@@ -1,0 +1,39 @@
+# The Rust port (crates/): format, lint, unit tests, then the corpus
+# compiled to Rust, built and compared with the recorded nix output.
+# derivations.nix is skipped until the Rust runtime has derivations
+# (docs/rust.md).
+name: rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests
+        run: cargo test
+
+      - name: Corpus against the recorded nix output
+        run: cargo run -q -p jinx -- test-corpus tests/corpus --skip derivations.nix

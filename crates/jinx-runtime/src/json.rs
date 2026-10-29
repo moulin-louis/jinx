@@ -101,236 +101,55 @@ pub fn json_quote(s: &[u8], out: &mut Vec<u8>) {
 
 // ---- fromJSON ---------------------------------------------------------------
 
+// Parsed by serde_json, which reads JSON as nlohmann does where it shows:
+// `1` is an integer, `1.0` and `1e2` are floats, the last of duplicate
+// keys wins, and an integer beyond 2^64 - 1 is a float. Nesting is
+// limited by the evaluator's stack alone.
 pub fn from_json(text: &[u8]) -> Result<Value> {
-    let mut p = Parser { s: text, i: 0 };
-    p.ws();
-    let v = p.value(0)?;
-    p.ws();
-    if p.i != p.s.len() {
-        return p.fail("expected end of input");
-    }
-    Ok(v)
+    use serde::Deserialize;
+    let mut de = serde_json::Deserializer::from_slice(text);
+    de.disable_recursion_limit();
+    let parsed = serde_json::Value::deserialize(&mut de)
+        .and_then(|v| de.end().map(|()| v))
+        .map_err(|e| NixError::boxed(format!("while parsing JSON: {e}")))?;
+    convert(parsed)
 }
 
-struct Parser<'a> {
-    s: &'a [u8],
-    i: usize,
+fn json_string(s: String) -> Result<Value> {
+    if s.contains('\0') {
+        return err("JSON string contains a null byte, which a Nix string cannot hold");
+    }
+    Ok(mk_str(s.into_bytes(), None))
 }
 
-// The evaluator thread has a large stack; nesting is limited by it alone.
-const MAX_DEPTH: usize = 1_000_000;
-
-impl Parser<'_> {
-    fn fail<T>(&self, what: &str) -> Result<T> {
-        err(format!(
-            "while parsing JSON: syntax error at byte {}: {what}",
-            self.i + 1
-        ))
-    }
-
-    fn ws(&mut self) {
-        while self.i < self.s.len() && matches!(self.s[self.i], b' ' | b'\t' | b'\n' | b'\r') {
-            self.i += 1;
-        }
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.s.get(self.i).copied()
-    }
-
-    fn literal(&mut self, word: &[u8], v: Value) -> Result<Value> {
-        if self.s[self.i..].starts_with(word) {
-            self.i += word.len();
-            Ok(v)
-        } else {
-            self.fail("invalid literal")
-        }
-    }
-
-    fn value(&mut self, depth: usize) -> Result<Value> {
-        if depth > MAX_DEPTH {
-            return self.fail("nesting too deep");
-        }
-        match self.peek() {
-            Some(b'{') => {
-                self.i += 1;
-                let mut a = Attrs::new();
-                self.ws();
-                if self.peek() == Some(b'}') {
-                    self.i += 1;
-                    return Ok(attrs(a));
-                }
-                loop {
-                    self.ws();
-                    if self.peek() != Some(b'"') {
-                        return self.fail("expected a string");
-                    }
-                    let k = self.string()?;
-                    self.ws();
-                    if self.peek() != Some(b':') {
-                        return self.fail("expected ':'");
-                    }
-                    self.i += 1;
-                    self.ws();
-                    let v = self.value(depth + 1)?;
-                    a.insert(String::from_utf8_lossy(&k).into_owned(), v);
-                    self.ws();
-                    match self.peek() {
-                        Some(b',') => self.i += 1,
-                        Some(b'}') => {
-                            self.i += 1;
-                            return Ok(attrs(a));
-                        }
-                        _ => return self.fail("expected ',' or '}'"),
-                    }
-                }
-            }
-            Some(b'[') => {
-                self.i += 1;
-                let mut items = Vec::new();
-                self.ws();
-                if self.peek() == Some(b']') {
-                    self.i += 1;
-                    return Ok(Value::List(std::rc::Rc::new(items)));
-                }
-                loop {
-                    self.ws();
-                    items.push(self.value(depth + 1)?);
-                    self.ws();
-                    match self.peek() {
-                        Some(b',') => self.i += 1,
-                        Some(b']') => {
-                            self.i += 1;
-                            return Ok(Value::List(std::rc::Rc::new(items)));
-                        }
-                        _ => return self.fail("expected ',' or ']'"),
-                    }
-                }
-            }
-            Some(b'"') => Ok(mk_str(self.string()?, None)),
-            Some(b't') => self.literal(b"true", Value::Bool(true)),
-            Some(b'f') => self.literal(b"false", Value::Bool(false)),
-            Some(b'n') => self.literal(b"null", Value::Null),
-            Some(b'-' | b'0'..=b'9') => self.number(),
-            _ => self.fail("unexpected character"),
-        }
-    }
-
-    fn number(&mut self) -> Result<Value> {
-        let start = self.i;
-        let mut float = false;
-        if self.peek() == Some(b'-') {
-            self.i += 1;
-        }
-        let digits = |p: &mut Self| {
-            let s = p.i;
-            while p.peek().is_some_and(|c| c.is_ascii_digit()) {
-                p.i += 1;
-            }
-            p.i - s
-        };
-        if digits(self) == 0 {
-            return self.fail("invalid number");
-        }
-        if self.peek() == Some(b'.') {
-            float = true;
-            self.i += 1;
-            if digits(self) == 0 {
-                return self.fail("invalid number");
-            }
-        }
-        if matches!(self.peek(), Some(b'e' | b'E')) {
-            float = true;
-            self.i += 1;
-            if matches!(self.peek(), Some(b'+' | b'-')) {
-                self.i += 1;
-            }
-            if digits(self) == 0 {
-                return self.fail("invalid number");
-            }
-        }
-        let text = std::str::from_utf8(&self.s[start..self.i]).unwrap();
-        if !float {
-            // nlohmann reads an integer up to 2^64 - 1 as one, which Nix
-            // refuses beyond int64, and anything larger as a float.
-            if let Ok(i) = text.parse::<i64>() {
-                return Ok(Value::Int(i));
-            }
-            if text.parse::<u64>().is_ok() {
+fn convert(v: serde_json::Value) -> Result<Value> {
+    Ok(match v {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(b) => Value::Bool(b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if n.is_u64() {
                 return err(format!(
-                    "unsigned json number {text} outside of Nix integer range"
+                    "unsigned json number {n} outside of Nix integer range"
                 ));
+            } else {
+                Value::Float(n.as_f64().unwrap_or(f64::NAN))
             }
         }
-        Ok(Value::Float(text.parse::<f64>().unwrap_or(f64::NAN)))
-    }
-
-    fn hex4(&mut self) -> Result<u32> {
-        let h = self
-            .s
-            .get(self.i..self.i + 4)
-            .and_then(|h| std::str::from_utf8(h).ok());
-        let Some(n) = h.and_then(|h| u32::from_str_radix(h, 16).ok()) else {
-            return self.fail("invalid \\u escape");
-        };
-        self.i += 4;
-        Ok(n)
-    }
-
-    fn string(&mut self) -> Result<Vec<u8>> {
-        self.i += 1;
-        let mut out = Vec::new();
-        loop {
-            let Some(c) = self.peek() else {
-                return self.fail("unterminated string");
-            };
-            self.i += 1;
-            match c {
-                b'"' => {
-                    if out.contains(&0) {
-                        return err(
-                            "JSON string contains a null byte, which a Nix string cannot hold",
-                        );
-                    }
-                    return Ok(out);
+        serde_json::Value::String(s) => json_string(s)?,
+        serde_json::Value::Array(items) => Value::List(std::rc::Rc::new(
+            items.into_iter().map(convert).collect::<Result<_>>()?,
+        )),
+        serde_json::Value::Object(map) => {
+            let mut a = Attrs::new();
+            for (k, v) in map {
+                if k.contains('\0') {
+                    return err("JSON key contains a null byte, which a Nix string cannot hold");
                 }
-                b'\\' => {
-                    let Some(e) = self.peek() else {
-                        return self.fail("unterminated string");
-                    };
-                    self.i += 1;
-                    match e {
-                        b'"' => out.push(b'"'),
-                        b'\\' => out.push(b'\\'),
-                        b'/' => out.push(b'/'),
-                        b'b' => out.push(0x08),
-                        b'f' => out.push(0x0c),
-                        b'n' => out.push(b'\n'),
-                        b'r' => out.push(b'\r'),
-                        b't' => out.push(b'\t'),
-                        b'u' => {
-                            let mut cp = self.hex4()?;
-                            if (0xd800..0xdc00).contains(&cp) {
-                                if !self.s[self.i..].starts_with(b"\\u") {
-                                    return self.fail("invalid surrogate pair");
-                                }
-                                self.i += 2;
-                                let lo = self.hex4()?;
-                                if !(0xdc00..0xe000).contains(&lo) {
-                                    return self.fail("invalid surrogate pair");
-                                }
-                                cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00);
-                            }
-                            let ch = char::from_u32(cp).unwrap_or('\u{fffd}');
-                            let mut buf = [0; 4];
-                            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                        }
-                        _ => return self.fail("invalid escape"),
-                    }
-                }
-                c if c < 0x20 => return self.fail("control character in string"),
-                c => out.push(c),
+                a.insert(k, convert(v)?);
             }
+            attrs(a)
         }
-    }
+    })
 }

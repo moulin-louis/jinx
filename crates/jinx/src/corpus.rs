@@ -91,12 +91,8 @@ fn evaluate(compiled: &crate::compile::Compiled, exe: &PathBuf, file: &str) -> O
     }
 }
 
-pub fn run_lang(args: &[String]) -> ExitCode {
-    let Some(dir) = args.first().map(|d| absolute(d)) else {
-        eprintln!("usage: jinx test-lang DIR [NAME-FILTER]");
-        return ExitCode::from(2);
-    };
-    let filter = args.get(1).cloned().unwrap_or_default();
+pub fn run_lang(dir: &str, filter: &str) -> ExitCode {
+    let dir = absolute(dir);
     let mut names: Vec<String> = match fs::read_dir(&dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
@@ -104,7 +100,7 @@ pub fn run_lang(args: &[String]) -> ExitCode {
             .filter(|n| {
                 (n.starts_with("eval-okay-") || n.starts_with("eval-fail-"))
                     && n.ends_with(".nix")
-                    && n.contains(&filter)
+                    && n.contains(filter)
             })
             .collect(),
         Err(e) => {
@@ -117,7 +113,13 @@ pub fn run_lang(args: &[String]) -> ExitCode {
     let mut skipped = 0;
     names.retain(|n| {
         let s = stem(n);
-        let skip = std::path::Path::new(&format!("{s}.flags")).exists()
+        let flags = fs::read_to_string(format!("{s}.flags")).ok();
+        // Turning on parse-toml-timestamps does not change whether an
+        // invalid document is refused, so those failure cases still run.
+        let harmless = n.starts_with("eval-fail-")
+            && flags.as_deref().map(str::trim)
+                == Some("--extra-experimental-features parse-toml-timestamps");
+        let skip = (flags.is_some() && !harmless)
             || std::path::Path::new(&format!("{s}.exp-disabled")).exists()
             || (n.starts_with("eval-okay-") && !std::path::Path::new(&format!("{s}.exp")).exists());
         skipped += skip as usize;
@@ -172,22 +174,8 @@ pub fn run_lang(args: &[String]) -> ExitCode {
     }
 }
 
-pub fn run(args: &[String]) -> ExitCode {
-    let mut dir = None;
-    let mut record = false;
-    let mut skip = Vec::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--record" => record = true,
-            "--skip" => skip.extend(it.next().cloned()),
-            _ => dir = Some(absolute(a)),
-        }
-    }
-    let Some(dir) = dir else {
-        eprintln!("usage: jinx test-corpus DIR [--record] [--skip NAME.nix]...");
-        return ExitCode::from(2);
-    };
+pub fn run(dir: &str, record: bool, skip: &[String]) -> ExitCode {
+    let dir = absolute(dir);
     let mut files: Vec<String> = match fs::read_dir(&dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())

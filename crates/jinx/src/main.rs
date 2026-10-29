@@ -1,16 +1,4 @@
-// jinx: Nix, transpiled to Rust.
-//
-//   jinx compile FILE.nix... [-o DIR]    write the Cargo package for FILEs
-//   jinx eval FILE.nix [-A attr] [--system S] [--impure]
-//                                        compile, build and run, printing
-//                                        the value as nix-instantiate
-//                                        --eval --strict does
-//   jinx test-corpus DIR [--record] [--skip NAME.nix]
-//                                        compare every DIR/*.nix with the
-//                                        recorded output of Nix
-//   jinx test-lang DIR [FILTER]          run Nix's eval-okay/eval-fail
-//                                        language tests in DIR
-//   jinx parse FILE.nix                  print the syntax tree
+// jinx: Nix, transpiled to Rust. `jinx --help` lists the commands.
 
 mod ast;
 mod builtins_table;
@@ -23,28 +11,86 @@ mod parser;
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
+use clap::{Parser, Subcommand};
+
 use compile::{absolute, build_package, cache_root, compile_closure, package_name, write_package};
 
-fn usage() -> ExitCode {
-    eprintln!(
-        "usage:\n  jinx compile FILE.nix... [-o DIR]\n  jinx eval FILE.nix [-A attr] [--system SYSTEM] [--impure]\n  jinx test-corpus DIR\n  jinx parse FILE.nix"
-    );
-    ExitCode::from(2)
+#[derive(Parser)]
+#[command(name = "jinx", version, about = "Nix, transpiled to Rust")]
+struct Cli {
+    #[command(subcommand)]
+    command: Cmd,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Write the Cargo package for FILEs and the files they import.
+    Compile {
+        #[arg(required = true)]
+        files: Vec<String>,
+        /// The package directory; out/jinx-<hash> by default.
+        #[arg(short)]
+        out: Option<PathBuf>,
+    },
+    /// Compile, build and run FILE, printing its value as
+    /// `nix-instantiate --eval --strict` does.
+    Eval {
+        file: String,
+        /// Select an attribute of the value.
+        #[arg(short = 'A', value_name = "ATTR.PATH")]
+        attr: Option<String>,
+        /// The value of builtins.currentSystem.
+        #[arg(long)]
+        system: Option<String>,
+        /// Let getEnv read the environment.
+        #[arg(long)]
+        impure: bool,
+    },
+    /// Compare every DIR/*.nix with the recorded output of Nix in DIR/*.exp.
+    TestCorpus {
+        dir: String,
+        /// Run nix-instantiate and rewrite the recordings.
+        #[arg(long)]
+        record: bool,
+        /// Leave out a file, by name.
+        #[arg(long, value_name = "NAME.nix")]
+        skip: Vec<String>,
+    },
+    /// Run Nix's eval-okay/eval-fail language tests in DIR.
+    TestLang {
+        dir: String,
+        /// Only the tests whose name contains this.
+        #[arg(default_value = "")]
+        filter: String,
+    },
+    /// Print the syntax tree of FILE.
+    Parse { file: String },
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(cmd) = args.first() else {
-        return usage();
-    };
-    let rest = &args[1..];
-    match cmd.as_str() {
-        "compile" => cmd_compile(rest),
-        "eval" => cmd_eval(rest),
-        "test-corpus" => corpus::run(rest),
-        "test-lang" => corpus::run_lang(rest),
-        "parse" => cmd_parse(rest),
-        _ => usage(),
+    match Cli::parse().command {
+        Cmd::Compile { files, out } => cmd_compile(files, out),
+        Cmd::Eval {
+            file,
+            attr,
+            system,
+            impure,
+        } => {
+            let mut pass = Vec::new();
+            if let Some(a) = attr {
+                pass.extend(["-A".to_string(), a]);
+            }
+            if let Some(s) = system {
+                pass.extend(["--system".to_string(), s]);
+            }
+            if impure {
+                pass.push("--impure".into());
+            }
+            cmd_eval(&file, pass)
+        }
+        Cmd::TestCorpus { dir, record, skip } => corpus::run(&dir, record, &skip),
+        Cmd::TestLang { dir, filter } => corpus::run_lang(&dir, &filter),
+        Cmd::Parse { file } => cmd_parse(&file),
     }
 }
 
@@ -53,10 +99,7 @@ fn fail(message: impl std::fmt::Display) -> ExitCode {
     ExitCode::from(1)
 }
 
-fn cmd_parse(args: &[String]) -> ExitCode {
-    let Some(file) = args.first() else {
-        return usage();
-    };
+fn cmd_parse(file: &str) -> ExitCode {
     let file = absolute(file);
     let src = match std::fs::read_to_string(&file) {
         Ok(s) => s,
@@ -71,28 +114,14 @@ fn cmd_parse(args: &[String]) -> ExitCode {
     }
 }
 
-fn cmd_compile(args: &[String]) -> ExitCode {
-    let mut files = Vec::new();
-    let mut out = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        if a == "-o" {
-            out = it.next().cloned();
-        } else {
-            files.push(absolute(a));
-        }
-    }
-    if files.is_empty() {
-        return usage();
-    }
+fn cmd_compile(files: Vec<String>, out: Option<PathBuf>) -> ExitCode {
+    let files: Vec<String> = files.iter().map(|f| absolute(f)).collect();
     let compiled = compile_closure(&files);
     if let Some((_, e)) = compiled.failed.iter().next() {
         return fail(e);
     }
     let package = package_name(&files);
-    let dir = out
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("out").join(&package));
+    let dir = out.unwrap_or_else(|| PathBuf::from("out").join(&package));
     if let Err(e) = write_package(&dir, &package, &compiled.modules, true) {
         return fail(e);
     }
@@ -100,23 +129,8 @@ fn cmd_compile(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn cmd_eval(args: &[String]) -> ExitCode {
-    let mut file = None;
-    let mut pass = Vec::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "-A" | "--system" => {
-                pass.push(a.clone());
-                pass.extend(it.next().cloned());
-            }
-            "--impure" => pass.push(a.clone()),
-            _ => file = Some(absolute(a)),
-        }
-    }
-    let Some(file) = file else {
-        return usage();
-    };
+fn cmd_eval(file: &str, pass: Vec<String>) -> ExitCode {
+    let file = absolute(file);
     let entries = vec![file.clone()];
     let compiled = compile_closure(&entries);
     if let Some(e) = compiled.failed.get(&file) {

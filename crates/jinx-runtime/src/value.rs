@@ -17,7 +17,7 @@
 // evaluation is one process that exits when it is done.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::rc::Rc;
 
@@ -89,11 +89,16 @@ pub struct Attr {
     pub pos: Option<Pos>,
 }
 
-// Names are ordered by their bytes, which is the order Nix enumerates
-// them in, so iteration needs no sort.
+// A persistent ordered map (imbl's B-tree with shared nodes): cloning a
+// set is O(1) and `//` copies only the paths it changes, which is what
+// nixpkgs needs, where every overlay is a `//` on a set of tens of
+// thousands of attributes. Names are ordered by their bytes, which is the
+// order Nix enumerates them in, so iteration needs no sort.
+pub type AttrMap = imbl::GenericOrdMap<Rc<str>, Attr, imbl::shared_ptr::RcK>;
+
 #[derive(Clone, Default)]
 pub struct Attrs {
-    pub map: BTreeMap<Rc<str>, Attr>,
+    pub map: AttrMap,
 }
 
 impl Attrs {

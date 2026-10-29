@@ -809,9 +809,20 @@ pub fn update_attrs(x: &Rc<Attrs>, y: &Rc<Attrs>) -> Rc<Attrs> {
     if x.is_empty() {
         return y.clone();
     }
+    // Insert the smaller side into a copy of the larger; the copy shares
+    // the larger's nodes.
     let mut out = (**x).clone();
-    for (k, v) in y.map.iter() {
-        out.map.insert(k.clone(), v.clone());
+    if y.len() <= x.len() {
+        for (k, v) in y.map.iter() {
+            out.map.insert(k.clone(), v.clone());
+        }
+    } else {
+        out = (**y).clone();
+        for (k, v) in x.map.iter() {
+            if !out.map.contains_key(k) {
+                out.map.insert(k.clone(), v.clone());
+            }
+        }
     }
     Rc::new(out)
 }

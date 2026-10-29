@@ -74,9 +74,7 @@ pub fn nix32_decode(s: &str) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
+pub use crate::hash::hex;
 
 pub fn sha256(data: &[u8]) -> Vec<u8> {
     Sha256::digest(data).to_vec()

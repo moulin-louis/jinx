@@ -4,6 +4,7 @@
 #![allow(non_snake_case)]
 
 pub mod builtins;
+pub mod hash;
 pub mod json;
 pub mod modules;
 pub mod numbers;
@@ -12,6 +13,7 @@ pub mod print;
 pub mod regex;
 pub mod sort;
 pub mod store;
+pub mod toml;
 pub mod value;
 
 pub use builtins::builtins;

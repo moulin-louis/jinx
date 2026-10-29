@@ -518,6 +518,15 @@ pub fn hashString(a: &[Value]) -> Result<Value> {
 
 // Nix's baseNameOf: one trailing slash is dropped, then what follows the
 // last slash; so `baseNameOf "a//"` is "".
+pub fn convertHash(a: &[Value]) -> Result<Value> {
+    let args = force_attrs(&a[0])?;
+    let hash = force_string(&attr(&a[0], "hash")?)?;
+    let algo = args.get("hashAlgo").map(force_string).transpose()?;
+    let to = force_string(&attr(&a[0], "toHashFormat")?)?;
+    let (algo, bytes) = crate::hash::parse_hash(&hash, algo.as_deref())?;
+    Ok(string(crate::hash::format_hash(&algo, &bytes, &to)?))
+}
+
 pub fn baseNameOf(a: &[Value]) -> Result<Value> {
     let s = coerce_to_string(&a[0], COERCE_PLAIN)?;
     let mut b: &[u8] = &s.bytes;
@@ -914,6 +923,10 @@ pub fn fromJSON(a: &[Value]) -> Result<Value> {
     from_json(&force_str(&a[0])?.bytes)
 }
 
+pub fn fromTOML(a: &[Value]) -> Result<Value> {
+    crate::toml::from_toml(&force_str(&a[0])?.bytes)
+}
+
 // ---- contexts ---------------------------------------------------------------
 
 pub fn hasContext(a: &[Value]) -> Result<Value> {
@@ -1046,8 +1059,42 @@ pub fn path(a: &[Value]) -> Result<Value> {
     let args = force_attrs(&a[0])?;
     let p = path_of(&attr(&a[0], "path")?)?;
     let name = args.get("name").map(force_string_no_ctx).transpose()?;
-    if args.has("sha256") || args.get("recursive").is_some() {
-        return err("builtins.path with sha256 or recursive is not supported yet");
+    let recursive = args
+        .get("recursive")
+        .map(force_bool)
+        .transpose()?
+        .unwrap_or(true);
+    let fixed = |hash: &[u8]| -> Result<Value> {
+        let n = name
+            .clone()
+            .unwrap_or_else(|| store::base_name(&p).to_string());
+        let sp = store::make_fixed_output_path(recursive, "sha256", hash, &n)?;
+        Ok(mk_str(sp.clone().into_bytes(), Some(BTreeSet::from([sp]))))
+    };
+    let expected = args
+        .get("sha256")
+        .map(|h| crate::hash::parse_hash(&force_string_no_ctx(h)?, Some("sha256")))
+        .transpose()?;
+    if !recursive || expected.is_some() {
+        // The contents must have the hash given for them, as Nix checks.
+        let actual = if recursive {
+            let mut filter = args.get("filter").cloned().map(nix_filter);
+            store::nar_hash(&p, filter.as_mut().map(|f| f as PathFilter))?
+        } else {
+            let data = std::fs::read(&p)
+                .or_else(|_| err(format!("opening file '{p}': No such file or directory")))?;
+            hash_bytes("sha256", &data)?
+        };
+        if let Some((_, want)) = &expected {
+            if *want != actual {
+                return err(format!(
+                    "hash mismatch in path '{p}': specified sha256:{}, got sha256:{}",
+                    store::nix32_encode(want),
+                    store::nix32_encode(&actual)
+                ));
+            }
+        }
+        return fixed(&actual);
     }
     let mut filter = args.get("filter").cloned().map(nix_filter);
     let filter = filter.as_mut().map(|f| f as PathFilter);
@@ -1150,6 +1197,7 @@ pub const PRIMOPS: &[(&str, usize, PrimOpFn)] = &[
     ("concatLists", 1, concatLists),
     ("concatMap", 2, concatMap),
     ("concatStringsSep", 2, concatStringsSep),
+    ("convertHash", 1, convertHash),
     ("deepSeq", 2, deepSeq),
     ("derivation", 1, derivation),
     ("derivationStrict", 1, derivationStrict),
@@ -1167,6 +1215,7 @@ pub const PRIMOPS: &[(&str, usize, PrimOpFn)] = &[
     ("floor", 1, floor),
     ("foldl'", 3, foldl_),
     ("fromJSON", 1, fromJSON),
+    ("fromTOML", 1, fromTOML),
     ("functionArgs", 1, functionArgs),
     ("genList", 2, genList),
     ("genericClosure", 1, genericClosure),

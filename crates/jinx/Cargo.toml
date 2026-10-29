@@ -1,0 +1,11 @@
+[package]
+name = "jinx"
+description = "Nix, transpiled to Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sha2 = "0.10"
+jinx-runtime = { path = "../jinx-runtime" }
+clap = { version = "4.6.7", features = ["derive"] }

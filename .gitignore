@@ -14,3 +14,5 @@ site/js/nixpkgs-worker.js
 site/js/playground-worker.js
 site/docs/
 __pycache__/
+# Cargo build output.
+/target/

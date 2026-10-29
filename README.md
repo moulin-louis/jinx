@@ -45,6 +45,10 @@ $ nix-instantiate --eval --strict hello.nix
 { drv = "/nix/store/j8q5j0x495vfrxgha5m6q40yjdi59334-hello-2.12.2.drv"; out = "/nix/store/18bbdvag5v2f3d4y37pdbkzvh7s71cw4-hello-2.12.2"; }
 ```
 
+**Rust port:** jinx is being rewritten in Rust, compiling Nix to Rust
+(`crates/`). The language core works; see [docs/rust.md](./docs/rust.md)
+for its status.
+
 **Documentation:** [Usage](./docs/usage.md) ·
 [Why](./docs/why.md) ·
 [Design](./docs/design.md) ·

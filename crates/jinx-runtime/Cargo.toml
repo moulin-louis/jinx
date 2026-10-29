@@ -1,0 +1,17 @@
+[package]
+name = "jinx-runtime"
+description = "The runtime that Rust compiled from Nix by jinx links against"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+imbl = "7.0.2"
+serde_json = { version = "1.0.154", features = ["unbounded_depth"] }
+toml = "0.8"
+data-encoding = "2.11.1"
+serde = "1.0.229"
